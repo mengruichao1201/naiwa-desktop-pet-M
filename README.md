@@ -34,4 +34,3 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
 - `src\laugh_frames\`：捧腹动画帧
 - `build.ps1`：源码编译脚本
 - `启动奶娃桌宠.bat`：启动脚本
-
