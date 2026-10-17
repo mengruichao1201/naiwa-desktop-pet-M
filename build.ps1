@@ -1,3 +1,4 @@
+param([switch] $Check)
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -44,6 +45,14 @@ $arguments = @(
     "/reference:$systemXaml",
     "/resource:$($image.FullName),naiwa-cutout.png"
 )
+$manifest = Join-Path $root 'src\app.manifest'
+$arguments += "/win32manifest:$manifest"
+
+foreach ($sheetName in @('run-sheet.png', 'battle-sheet.png')) {
+    $sheet = Join-Path $root ('assets\' + $sheetName)
+    if (-not (Test-Path -LiteralPath $sheet)) { throw "Animation sheet not found: $sheetName" }
+    $arguments += "/resource:$sheet,$sheetName"
+}
 
 foreach ($frame in $frames) {
     $arguments += "/resource:$($frame.FullName),$($frame.Name)"
@@ -52,4 +61,20 @@ $arguments += $source
 
 & $csc @arguments
 if ($LASTEXITCODE -ne 0) { throw "Compilation failed with exit code $LASTEXITCODE." }
+Copy-Item -LiteralPath (Join-Path $root 'src\app.config') -Destination ($output + '.config') -Force
 Write-Host "Created $output"
+
+if ($Check) {
+    $checkExe = Join-Path $root 'tests\NaiwaPetChecks.exe'
+    $checkArguments = @($arguments | Where-Object { $_ -notlike '/target:*' -and $_ -notlike '/out:*' -and $_ -ne $source })
+    $checkArguments += '/target:exe'
+    $checkArguments += "/out:$checkExe"
+    $checkArguments += '/main:NaiwaPetChecks'
+    $checkArguments += $source
+    $checkArguments += (Join-Path $root 'tests\NaiwaPetChecks.cs')
+    & $csc @checkArguments
+    if ($LASTEXITCODE -ne 0) { throw 'Check compilation failed.' }
+    Copy-Item -LiteralPath (Join-Path $root 'src\app.config') -Destination ($checkExe + '.config') -Force
+    & $checkExe (Join-Path $root 'tests\check-output')
+    if ($LASTEXITCODE -ne 0) { throw 'Pet checks failed.' }
+}

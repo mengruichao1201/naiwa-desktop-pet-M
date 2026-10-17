@@ -3,3 +3,6 @@ bin/
 obj/
 *.log
 *.tmp
+tests/*.exe
+tests/*.exe.config
+tests/check-output/
