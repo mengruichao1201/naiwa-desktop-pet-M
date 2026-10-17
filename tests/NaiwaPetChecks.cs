@@ -65,13 +65,37 @@ internal static class NaiwaPetChecks
             Check(!keyed.Contains(0.02, 0.02), "Exterior white becomes transparent");
 
             pet = new NaiwaPetSprite();
-            Check(pet.RunClip != null && pet.RunClip.Frames.Length == 9, "Nine running sheet frames are present");
+            Check(pet.RunClip != null && pet.RunClip.Frames.Length == 12, "Twelve real gait phases are present");
             Check(pet.BattleClip != null && pet.BattleClip.Frames.Length == 6, "Six combat sheet frames are present");
             Near(VisibleRect(pet.IdleClip, 0).Height, PetMotion.CharacterHeight, "Static visible height");
             Near(VisibleRect(pet.LaughClip, 0).Height, PetMotion.CharacterHeight, "Laugh starts at the same visible height");
             Near(VisibleRect(pet.IdleClip, 0).Bottom, VisibleRect(pet.LaughClip, 0).Bottom, "Static and laugh feet align");
             VerifyClip(pet.IdleClip, "idle"); VerifyClip(pet.LaughClip, "laugh");
             VerifyClip(pet.RunClip, "run"); VerifyClip(pet.BattleClip, "battle");
+            int narrow = 0, wide = 0; double maxSpan = 0;
+            double[] spans = new double[pet.RunClip.Frames.Length];
+            for (int i = 0; i < spans.Length; i++) { spans[i] = FootSpan(pet.RunClip.Frames[i]); maxSpan = Math.Max(maxSpan, spans[i]); }
+            for (int i = 0; i < spans.Length; i++)
+            {
+                if (spans[i] < maxSpan * 0.70) narrow++; else wide++;
+                PetFrame f = pet.RunClip.Frames[i]; Rect r = pet.RunClip.Rectangles[i];
+                double headToBody = pet.RunClip.Frames[0].BodyCenterX - pet.RunClip.Frames[0].HeadCenterX;
+                Near(r.X + (f.HeadCenterX + headToBody) * r.Width / f.Bitmap.PixelWidth, pet.IdleClip.BodyAnchorX,
+                    "Arm swings do not drag the head and body anchor sideways");
+                Near(r.Y, pet.RunClip.Rectangles[0].Y, "Running preserves original vertical foot lift");
+            }
+            Console.WriteLine("Gait support: " + narrow + " compact phases, " + wide + " extended phases.");
+            Check(narrow >= 4 && wide >= 2, "Gait must contain passing/tucked legs as well as extended legs");
+            int forwardHandPhases = 0;
+            for (int i = 0; i < pet.RunClip.Frames.Length; i++)
+                if (FrontHandCoverage(pet.RunClip.Frames[i]) >= 0.0015) forwardHandPhases++;
+            Console.WriteLine("Arm swing: " + forwardHandPhases + " phases have a hand passing across the belly.");
+            Check(forwardHandPhases >= 4, "Hands must pass across the foreground instead of staying glued to the hip");
+            Check(VisibleRect(pet.RunClip, 4).Bottom < VisibleRect(pet.RunClip, 0).Bottom - 30,
+                "Flight pose must lift its feet instead of being pinned to the ground");
+            Near(PetMotion.RunFlight(0.8 / 12), 0, "Compression remains grounded");
+            Check(PetMotion.RunFlight(0.8 / 3) > 0.99, "Flight has a smooth body lift");
+            Near(PetMotion.RunFlight(0), PetMotion.RunFlight(PetMotion.RunCycleSeconds), "Run bob closes its loop");
             pet.Show(); pet.Left = -20000; pet.Top = -20000;
             IntPtr hwnd = new System.Windows.Interop.WindowInteropHelper(pet).Handle;
             var nativeMoves = System.Diagnostics.Stopwatch.StartNew();
@@ -104,6 +128,17 @@ internal static class NaiwaPetChecks
             pet.EvaluateAction(2.61); Check(scene.CurrentClip == pet.IdleClip, "Combat returns after hold and transitions");
             pet.SetAction(PetAction.Run); pet.EvaluateAction(0.15); Snapshot(pet, output, "run-left");
             scene.Mirrored = true; scene.InvalidateVisual(); Snapshot(pet, output, "run-right");
+            Near(scene.MirrorAnchorX, pet.IdleClip.BodyAnchorX, "Mirroring keeps the torso under the grab anchor");
+            pet.SetAction(PetAction.Run);
+            var phases = new System.Collections.Generic.HashSet<int>();
+            for (int i = 0; i < 24; i++)
+            {
+                pet.EvaluateAction(i * PetMotion.RunCycleSeconds / 24);
+                phases.Add(scene.Frame);
+                Snapshot(pet, output, "run-phase-" + i.ToString("D2"));
+            }
+            Check(phases.Count == 12, "A displayed cycle actually visits all twelve phases");
+            Check(PetMotion.RunFrame(PetMotion.RunCycleSeconds + 0.00001) == 0, "Run timing wraps cleanly");
             pet.SetAction(PetAction.Head); Check(scene.CurrentClip == pet.IdleClip && !scene.Mirrored, "New interaction interrupts the previous action cleanly");
             Check(scene.InputHitTest(new Point(2, 2)) == null, "Transparent canvas margin does not capture clicks");
             var previewHashes = new System.Collections.Generic.HashSet<string>();
@@ -127,6 +162,34 @@ internal static class NaiwaPetChecks
         double sx = r.Width / f.Bitmap.PixelWidth, sy = r.Height / f.Bitmap.PixelHeight;
         return new Rect(r.X + f.AlphaBounds.X * sx, r.Y + f.AlphaBounds.Y * sy,
             f.AlphaBounds.Width * sx, f.AlphaBounds.Height * sy);
+    }
+    private static double FootSpan(PetFrame frame)
+    {
+        int w = frame.Bitmap.PixelWidth, h = frame.Bitmap.PixelHeight;
+        byte[] pixels = new byte[w * h * 4];
+        new FormatConvertedBitmap(frame.Bitmap, PixelFormats.Bgra32, null, 0).CopyPixels(pixels, w * 4, 0);
+        int left = w, right = -1;
+        int top = frame.AlphaBounds.Y + frame.AlphaBounds.Height * 80 / 100;
+        for (int y = top; y < h; y++) for (int x = 0; x < w; x++)
+            if (pixels[(y * w + x) * 4 + 3] >= 40) { left = Math.Min(left, x); right = Math.Max(right, x); }
+        return right - left + 1;
+    }
+    private static double FrontHandCoverage(PetFrame frame)
+    {
+        int w = frame.Bitmap.PixelWidth, h = frame.Bitmap.PixelHeight;
+        byte[] pixels = new byte[w * h * 4];
+        new FormatConvertedBitmap(frame.Bitmap, PixelFormats.Bgra32, null, 0).CopyPixels(pixels, w * 4, 0);
+        int left = Math.Max(0, (int)(frame.BodyCenterX - w * 0.21));
+        int right = Math.Min(w - 1, (int)(frame.BodyCenterX + w * 0.03));
+        int top = frame.AlphaBounds.Y + frame.AlphaBounds.Height * 28 / 100;
+        int bottom = frame.AlphaBounds.Y + frame.AlphaBounds.Height * 60 / 100;
+        int covered = 0;
+        for (int y = top; y <= bottom; y++) for (int x = left; x <= right; x++)
+        {
+            int p = (y * w + x) * 4;
+            if (pixels[p + 3] >= 100 && pixels[p + 2] < 170 && pixels[p + 1] < 165 && pixels[p] < 130) covered++;
+        }
+        return (double)covered / (w * h);
     }
     private static void VerifyClip(PetClip clip, string name)
     {

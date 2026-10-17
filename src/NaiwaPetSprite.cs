@@ -12,8 +12,8 @@ using System.Windows.Media.Imaging;
 using Forms = System.Windows.Forms;
 using Point = System.Windows.Point;
 
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.1.2.0")]
+[assembly: AssemblyFileVersion("1.1.2.0")]
 
 internal enum PetAction { Idle, Head, Hand, Laugh, Battle, Run, Settle }
 
@@ -22,6 +22,8 @@ internal static class PetMotion
     internal const double SceneWidth = 600, SceneHeight = 840;
     internal const double CharacterHeight = 660, FeetY = 750;
     internal const double LaughFps = 12;
+    internal const double RunCycleSeconds = 0.80;
+    private static readonly double[] RunDurations = { 0.08, 0.07, 0.08, 0.06, 0.04, 0.07, 0.08, 0.07, 0.08, 0.06, 0.04, 0.07 };
     internal const double BattleEnterSeconds = 0.30, BattleHoldSeconds = 2.0, BattleExitSeconds = 0.30;
     internal static double Clamp(double x, double a, double b) { return Math.Max(a, Math.Min(b, x)); }
     internal static double Smooth(double x) { x = Clamp(x, 0, 1); return x * x * (3 - 2 * x); }
@@ -42,6 +44,22 @@ internal static class PetMotion
         if (seconds < BattleEnterSeconds + BattleHoldSeconds) return 2;
         return Math.Min(5, 4 + (int)((seconds - BattleEnterSeconds - BattleHoldSeconds) / (BattleExitSeconds / 2)));
     }
+    internal static int RunFrame(double seconds)
+    {
+        double t = Math.Max(0, seconds) % RunCycleSeconds;
+        for (int i = 0; i < RunDurations.Length; i++)
+        {
+            if (t < RunDurations[i] - 0.0000001) return i;
+            t -= RunDurations[i];
+        }
+        return 0;
+    }
+    internal static double RunFlight(double seconds)
+    {
+        double phase = (seconds % RunCycleSeconds) / RunCycleSeconds;
+        double lift = Math.Max(0, -Math.Cos((phase - 1.0 / 12) * 4 * Math.PI));
+        return lift * lift;
+    }
     internal static Rect FrameRect(PetFrame reference, PetFrame image)
     {
         // One scale and one anchor per sequence. Never fit each bent pose separately.
@@ -59,6 +77,8 @@ internal sealed class PetFrame
 {
     internal readonly BitmapSource Bitmap;
     internal readonly Int32Rect AlphaBounds;
+    internal readonly double BodyCenterX;
+    internal readonly double HeadCenterX;
     private readonly byte[] alpha;
     internal PetFrame(BitmapSource bitmap) : this(bitmap, false) { }
     internal PetFrame(BitmapSource bitmap, bool removeWhiteBackground)
@@ -86,6 +106,19 @@ internal sealed class PetFrame
         }
         if (x1 < x0) throw new InvalidDataException("动作图片没有可见角色。");
         AlphaBounds = new Int32Rect(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+        double sumX = 0, weight = 0;
+        int bandTop = y0 + AlphaBounds.Height * 35 / 100;
+        int bandBottom = y0 + AlphaBounds.Height * 65 / 100;
+        for (int y = bandTop; y <= bandBottom; y++) for (int x = x0; x <= x1; x++)
+        {
+            if (alpha[y * w + x] < 40) continue;
+            sumX += x; weight++;
+        }
+        BodyCenterX = weight > 0 ? sumX / weight : x0 + AlphaBounds.Width / 2.0;
+        double headSum = 0, headWeight = 0;
+        for (int y = h * 6 / 100; y < h * 25 / 100; y++) for (int x = x0; x <= x1; x++)
+            if (alpha[y * w + x] >= 40) { headSum += x; headWeight++; }
+        HeadCenterX = headWeight > 0 ? headSum / headWeight : BodyCenterX;
     }
     private static bool IsOutsideWhite(byte[] pixels, int p)
     {
@@ -125,6 +158,7 @@ internal sealed class PetClip
 {
     internal readonly PetFrame[] Frames;
     internal readonly Rect[] Rectangles;
+    internal double BodyAnchorX { get { return Rectangles[0].X + Frames[0].BodyCenterX * Rectangles[0].Width / Frames[0].Bitmap.PixelWidth; } }
     internal PetClip(PetFrame[] frames) : this(frames, false) { }
     internal PetClip(PetFrame[] frames, bool stabilize)
     {
@@ -150,6 +184,8 @@ internal sealed class PetClip
         }
     }
     internal static PetClip LoadSheet(string name, int columns, int rows)
+    { return LoadSheet(name, columns, rows, true); }
+    internal static PetClip LoadSheet(string name, int columns, int rows, bool stabilizeFeet)
     {
         BitmapSource sheet = ReadBitmap(name);
         if (sheet == null) return null;
@@ -162,7 +198,21 @@ internal sealed class PetClip
             var b = new CroppedBitmap(sheet, new Int32Rect(i % columns * w, i / columns * h, w, h));
             b.Freeze(); frames[i] = new PetFrame(b, true);
         }
-        return new PetClip(frames, true);
+        return new PetClip(frames, stabilizeFeet);
+    }
+    internal void AlignRunningBody(PetClip standing)
+    {
+        // First jog pose already has bent knees; keep its body size close to the previous run art.
+        double s = PetMotion.CharacterHeight * 0.96 / Frames[0].AlphaBounds.Height;
+        double target = standing.BodyAnchorX;
+        double headToBody = Frames[0].BodyCenterX - Frames[0].HeadCenterX;
+        double top = PetMotion.FeetY - (Frames[0].AlphaBounds.Y + Frames[0].AlphaBounds.Height) * s;
+        for (int i = 0; i < Frames.Length; i++)
+        {
+            // Arm swings must not pull the whole character sideways. Anchor the head, preserving its reference offset to the torso.
+            double anchor = Frames[i].HeadCenterX + headToBody;
+            Rectangles[i] = new Rect(target - anchor * s, top, Frames[i].Bitmap.PixelWidth * s, Frames[i].Bitmap.PixelHeight * s);
+        }
     }
 }
 
@@ -172,6 +222,7 @@ internal sealed class PetScene : FrameworkElement
     internal PetClip CurrentClip;
     internal int Frame;
     internal bool Mirrored;
+    internal double MirrorAnchorX = PetMotion.SceneWidth / 2;
     internal double Head, Bob, Angle, ScaleX = 1, ScaleY = 1, LegPhase, Crouch;
     internal bool PuppetRun;
     private readonly PetClip idle;
@@ -197,11 +248,12 @@ internal sealed class PetScene : FrameworkElement
     internal void Reset()
     {
         Head = Bob = Angle = LegPhase = Crouch = 0; ScaleX = ScaleY = 1; PuppetRun = Mirrored = false;
+        MirrorAnchorX = PetMotion.SceneWidth / 2;
     }
     protected override HitTestResult HitTestCore(PointHitTestParameters parameters)
     {
         Point p = parameters.HitPoint;
-        if (Mirrored) p.X = PetMotion.SceneWidth - p.X;
+        if (Mirrored) p.X = 2 * MirrorAnchorX - p.X;
         Rect r = CurrentClip.Rectangles[Frame];
         return CurrentClip.Frames[Frame].Contains((p.X - r.X) / r.Width, (p.Y - r.Y) / r.Height)
             ? new PointHitTestResult(this, parameters.HitPoint) : null;
@@ -213,7 +265,7 @@ internal sealed class PetScene : FrameworkElement
         dc.PushTransform(new ScaleTransform(ScaleX, ScaleY, cx, feet));
         dc.PushTransform(new RotateTransform(Angle, cx, feet));
         dc.PushTransform(new TranslateTransform(0, Bob));
-        if (Mirrored) dc.PushTransform(new ScaleTransform(-1, 1, cx, feet));
+        if (Mirrored) dc.PushTransform(new ScaleTransform(-1, 1, MirrorAnchorX, feet));
         if (CurrentClip == idle && Math.Abs(Head) > 0.001) DrawHead(dc);
         else if (CurrentClip == idle && PuppetRun) DrawRunningLegs(dc);
         else dc.DrawImage(CurrentClip.Frames[Frame].Bitmap, CurrentClip.Rectangles[Frame]);
@@ -276,12 +328,17 @@ internal sealed class NaiwaPetSprite : Window
     internal PetClip BattleClip { get { return battle; } }
 
     [STAThread]
-    private static int Main()
+    private static int Main(string[] args)
     {
         try
         {
             var app = new Application(); app.ShutdownMode = ShutdownMode.OnMainWindowClose;
-            app.Run(new NaiwaPetSprite()); return 0;
+            double initialScale = 0.62, parsed;
+            for (int i = 0; i + 1 < args.Length; i++)
+                if (args[i] == "--scale" && double.TryParse(args[i + 1], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out parsed) && !double.IsNaN(parsed) && !double.IsInfinity(parsed))
+                    initialScale = PetMotion.Clamp(parsed, 0.34, 1.30);
+            app.Run(new NaiwaPetSprite(initialScale)); return 0;
         }
         catch (Exception ex)
         {
@@ -289,8 +346,10 @@ internal sealed class NaiwaPetSprite : Window
             return 1;
         }
     }
-    internal NaiwaPetSprite()
+    internal NaiwaPetSprite() : this(0.62) { }
+    internal NaiwaPetSprite(double initialScale)
     {
+        sizeScale = PetMotion.Clamp(initialScale, 0.34, 1.30);
         WindowStyle = WindowStyle.None; ResizeMode = ResizeMode.NoResize; AllowsTransparency = true;
         Background = Brushes.Transparent; Topmost = true; ShowInTaskbar = true;
         WindowStartupLocation = WindowStartupLocation.Manual;
@@ -306,7 +365,8 @@ internal sealed class NaiwaPetSprite : Window
             frames[i] = new PetFrame(b);
         }
         laugh = new PetClip(frames);
-        run = PetClip.LoadSheet("run-sheet.png", 3, 3);
+        run = PetClip.LoadSheet("run-cycle-v2.png", 4, 3, false);
+        if (run != null) run.AlignRunningBody(idle);
         battle = PetClip.LoadSheet("battle-sheet.png", 3, 2);
         scene = new PetScene(idle);
         Content = new Viewbox { Stretch = Stretch.Uniform, Child = scene };
@@ -461,7 +521,15 @@ internal sealed class NaiwaPetSprite : Window
         else if (action == PetAction.Run)
         {
             scene.Mirrored = runDirection > 0;
-            if (run != null) { scene.CurrentClip = run; scene.Frame = 1 + ((int)(t * 12) % (run.Frames.Length - 1)); }
+            if (run != null)
+            {
+                scene.CurrentClip = run; scene.Frame = PetMotion.RunFrame(t);
+                scene.MirrorAnchorX = run.BodyAnchorX;
+                scene.Bob = -5 * PetMotion.RunFlight(t);
+                double contact = Math.Max(0, Math.Cos((t / PetMotion.RunCycleSeconds - 1.0 / 12) * 4 * Math.PI));
+                scene.ScaleY = 1 - 0.006 * contact;
+                scene.ScaleX = 1 + 0.003 * contact;
+            }
             else { scene.PuppetRun = true; scene.LegPhase = t * 15; scene.Bob = -5 * (1 - Math.Cos(t * 30)); scene.Angle = -2; }
         }
         else if (action == PetAction.Settle)
@@ -522,7 +590,7 @@ internal sealed class NaiwaPetSprite : Window
     private void UpdateTitle()
     {
         string scale = Math.Round(sizeScale * 100) + "%";
-        Title = "奶蛙桌宠 1.1 · " + scale; tray.Text = "奶蛙桌宠正在运行 · " + scale;
+        Title = "奶蛙桌宠 1.1.2 · " + scale; tray.Text = "奶蛙桌宠正在运行 · " + scale;
     }
     private void ShowPet(bool recenter)
     {

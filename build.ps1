@@ -48,7 +48,7 @@ $arguments = @(
 $manifest = Join-Path $root 'src\app.manifest'
 $arguments += "/win32manifest:$manifest"
 
-foreach ($sheetName in @('run-sheet.png', 'battle-sheet.png')) {
+foreach ($sheetName in @('run-cycle-v2.png', 'battle-sheet.png')) {
     $sheet = Join-Path $root ('assets\' + $sheetName)
     if (-not (Test-Path -LiteralPath $sheet)) { throw "Animation sheet not found: $sheetName" }
     $arguments += "/resource:$sheet,$sheetName"
